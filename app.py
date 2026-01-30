@@ -241,7 +241,7 @@ def main():
 
         if st.button("ゲームを最初からやり直す"):
             init_game()
-            st.experimental_rerun()
+            st.rerun()
 
     # メインエリア：ログ表示
     st.subheader("議論ログ")
@@ -263,7 +263,7 @@ def main():
             # 「議論を進める」ボタン
             if st.button("議論を進める（NPCが発言）"):
                 npc_talks()
-                st.experimental_rerun()
+                st.rerun()
 
             st.markdown("プレイヤーとして、感想やメモを残してもOKです。")
             user_comment = st.text_input("（任意）一言コメント：", key="discussion_comment")
@@ -271,7 +271,7 @@ def main():
                 if user_comment.strip():
                     st.session_state.log.append(f"{PLAYER_NAME}（あなた）：{user_comment}")
                     st.session_state.discussion_comment = ""  # 入力欄をクリアしたい場合
-                    st.experimental_rerun()
+                    st.rerun()
 
             st.markdown("---")
             st.write("議論が終わったら、投票フェーズに進みます。")
@@ -279,7 +279,7 @@ def main():
                 st.session_state.phase = "vote"
                 st.session_state.log.append("")
                 st.session_state.log.append("―― 投票タイム ――")
-                st.experimental_rerun()
+                st.rerun()
 
         # 投票フェーズ
         elif st.session_state.phase == "vote":
@@ -305,7 +305,7 @@ def main():
                 npc_votes()
                 # 投票を適用
                 apply_vote()
-                st.experimental_rerun()
+                st.rerun()
 
     # 結果フェーズ
     if st.session_state.game_over and st.session_state.phase == "result":
@@ -331,8 +331,9 @@ def main():
         st.markdown("---")
         if st.button("もう一度遊ぶ"):
             init_game()
-            st.experimental_rerun()
+            st.rerun()
 
 
 if __name__ == "__main__":
     main()
+
