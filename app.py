@@ -268,10 +268,11 @@ def main():
             st.markdown("プレイヤーとして、感想やメモを残してもOKです。")
             user_comment = st.text_input("（任意）一言コメント：", key="discussion_comment")
             if st.button("コメントをログに追加する"):
-                if user_comment.strip():
-                    st.session_state.log.append(f"{PLAYER_NAME}（あなた）：{user_comment}")
-                    st.session_state.discussion_comment = ""  # 入力欄をクリアしたい場合
-                    st.rerun()
+             if user_comment.strip():
+                st.session_state.log.append(f"{PLAYER_NAME}（あなた）：{user_comment}")
+                # 入力欄クリアのための初期化を削除し、自然にリセットされるようにする
+                st.rerun()
+
 
             st.markdown("---")
             st.write("議論が終わったら、投票フェーズに進みます。")
