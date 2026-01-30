@@ -9,7 +9,7 @@ import streamlit as st
 # 基本設定
 # ---------------------------------------
 PLAYER_NAME = "あなた"
-NPC_NAMES = ["シグマ", "レムナ", "ジョナス"]
+NPC_NAMES = ["セツ", "ラキオ","SQ"]
 ROLES = ["人間", "グノーシア"]
 MAX_DISCUSSION_TURNS = 5  # 議論最大ターン数
 
