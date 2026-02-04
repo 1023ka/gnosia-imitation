@@ -1,6 +1,7 @@
 # app.py
-# グノーシア風・一人用人狼っぽいミニゲーム（議論5ターン固定＋好感度システム）
-# 実行方法：streamlit run app.py
+# グノーシア風・一人用人狼っぽいミニゲーム
+# 6NPC + グノーシア1〜2人ランダム + 夜の「消す」処理付き
+# 実行: streamlit run app.py
 
 import random
 import streamlit as st
@@ -9,19 +10,18 @@ import streamlit as st
 # 基本設定
 # ---------------------------------------
 PLAYER_NAME = "あなた"
-NPC_NAMES = ["セツ", "ラキオ", "SQ"]
+NPC_NAMES = ["セツ", "ラキオ", "SQ", "ジナ", "ステラ", "しげみち"]
 ROLES = ["人間", "グノーシア"]
-MAX_DISCUSSION_TURNS = 5  # 1日あたり議論ターン数（固定）
+MAX_DISCUSSION_TURNS = 5  # 1日あたり議論ターン数
 
-# 好感度の変化量
-LIKE_DELTA_UP = 1     # 庇われたときの上昇量
-LIKE_DELTA_DOWN = -1  # 疑われたときの減少量
+LIKE_DELTA_UP = 1     # 庇われたときの好感度上昇
+LIKE_DELTA_DOWN = -1  # 疑われたときの好感度下降
 
 # ---------------------------------------
 # 好感度ユーティリティ
 # ---------------------------------------
 def init_like_map(names):
-    """全キャラ間の好感度を0で初期化（自分自身への好感度は持たない）"""
+    """全キャラ間の好感度を0で初期化"""
     like_map = {}
     for a in names:
         like_map[a] = {}
@@ -47,33 +47,37 @@ def change_like(from_name, to_name, delta):
 def init_game():
     """ゲーム開始時に一度だけ呼び出して状態を初期化する。"""
     all_names = [PLAYER_NAME] + NPC_NAMES
+
+    # グノーシア人数を 1〜2 でランダム決定
+    gn_count = random.choice([1, 2])
     roles = {name: "人間" for name in all_names}
-    gnosia = random.choice(all_names)
-    roles[gnosia] = "グノーシア"
+    gnosias = random.sample(all_names, gn_count)
+    for g in gnosias:
+        roles[g] = "グノーシア"
 
     st.session_state.roles = roles
     st.session_state.alive = {name: True for name in all_names}
     st.session_state.day = 1
-    st.session_state.phase = "discussion"
+    st.session_state.phase = "discussion"  # discussion → vote → night → result
     st.session_state.log = []
     st.session_state.vote_target = None
     st.session_state.npc_votes = {}
     st.session_state.game_over = False
     st.session_state.win = None
     st.session_state.player_statement = None
-    st.session_state.discussion_turn = 0  # その日の議論ターン（0〜MAX_DISCUSSION_TURNS）
-    st.session_state.like_map = init_like_map(all_names)  # 好感度マップ
+    st.session_state.discussion_turn = 0
+    st.session_state.like_map = init_like_map(all_names)
 
-    st.session_state.log.append("🌌 **ゲーム開始！** あなたを含む4人の中に、グノーシアが1人います。")
+    st.session_state.log.append("🌌 **ゲーム開始！** あなたを含む7人の中に、グノーシアが1〜2人います。")
     st.session_state.log.append("あなたの役職はサイドバーで確認してください。")
-    st.session_state.log.append("議論→投票を繰り返し、勝利を目指しましょう！")
+    st.session_state.log.append("議論→投票→夜の襲撃を繰り返し、勝利を目指しましょう！")
     st.session_state.log.append(f"※1日あたり議論はちょうど{MAX_DISCUSSION_TURNS}ターン行われます。")
 
 # ---------------------------------------
-# NPC発言ロジック（好感度を考慮）
+# NPC発言（好感度反映）
 # ---------------------------------------
 def npc_talks():
-    """NPCが順番に発言する（1ターン分）。好感度と役職を考慮して「疑う/庇う」を選択。"""
+    """NPCが順番に発言する（1ターン分）"""
     alive_names = [name for name, alive in st.session_state.alive.items() if alive]
     current_npcs = [n for n in NPC_NAMES if st.session_state.alive[n]]
 
@@ -87,72 +91,55 @@ def npc_talks():
     )
 
     for npc in current_npcs:
-        # 自分以外の生存者
         candidates = [n for n in alive_names if n != npc]
         if not candidates:
             continue
 
-        # 好感度に応じて「誰を疑いやすいか / 誰を庇いやすいか」を決める
         likes = st.session_state.like_map[npc]
-
-        # 疑い先候補：好感度が低い人ほど選ばれやすい
-        # 庇い先候補：好感度が高い人ほど選ばれやすい
-        def softmax_weights(values, reverse=False):
-            # reverse=False: 大きいほど重く, True: 小さいほど重く
-            # ここでは簡易的に (base + value) で重みをつける
-            base = 1.0
-            weights = []
-            for v in values:
-                if reverse:
-                    w = max(0.1, base - 0.2 * v)  # 好感度が高いと軽く
-                else:
-                    w = max(0.1, base + 0.2 * v)  # 好感度が高いと重く
-                weights.append(w)
-            return weights
-
         like_values = [likes.get(c, 0) for c in candidates]
 
-        # 「疑う」or「庇う」をランダムに選ぶが、人間もそれなりに疑う
-        # グノーシア：人間を疑いやすいが、好感度も少し考慮
-        # 人間：好感度の低い相手を疑いやすく、高い相手を庇いやすい
-        role = st.session_state.roles[npc]
+        def weight_from_like_for_suspicion(like_vals):
+            # 好感度が低いほど重く
+            weights = []
+            for v in like_vals:
+                w = 1.0 + max(0.0, -0.3 * v)
+                weights.append(max(0.1, w))
+            return weights
 
-        # 行動タイプを決める
+        def weight_from_like_for_trust(like_vals):
+            # 好感度が高いほど重く
+            weights = []
+            for v in like_vals:
+                w = 1.0 + 0.3 * v
+                weights.append(max(0.1, w))
+            return weights
+
+        role = st.session_state.roles[npc]
         if role == "グノーシア":
             action = random.choices(["疑う", "庇う"], weights=[0.7, 0.3], k=1)[0]
         else:
             action = random.choices(["疑う", "庇う"], weights=[0.6, 0.4], k=1)[0]
 
         if action == "疑う":
-            # 好感度が低いほど重くする
-            weights = softmax_weights([-v for v in like_values], reverse=False)
+            weights = weight_from_like_for_suspicion(like_values)
             target = random.choices(candidates, weights=weights, k=1)[0]
             msg = f"{npc}：{target}が怪しい気がする……。"
             st.session_state.log.append(msg)
-            # 疑われた側から見て、疑ってきた相手への好感度を下げる
             change_like(target, npc, LIKE_DELTA_DOWN)
         else:
-            # 好感度が高いほど重くする
-            weights = softmax_weights(like_values, reverse=False)
+            weights = weight_from_like_for_trust(like_values)
             target = random.choices(candidates, weights=weights, k=1)[0]
             msg = f"{npc}：{target}は信用してもよさそうだね。"
             st.session_state.log.append(msg)
-            # 庇われた側から見て、庇ってくれた相手への好感度を上げる
             change_like(target, npc, LIKE_DELTA_UP)
 
 # ---------------------------------------
-# プレイヤー発言の処理（好感度更新）
+# プレイヤー発言 → 好感度反映
 # ---------------------------------------
 def apply_player_statement(statement: str):
-    """
-    プレイヤーの「〜を疑う／〜を庇う」発言に応じて、対象NPCからプレイヤーへの好感度を更新。
-    例: "シグマを疑う", "レムナを庇う"
-    """
-    if not statement:
+    """プレイヤーの『〜を疑う／〜を庇う』に応じて、対象NPC→プレイヤーの好感度を更新"""
+    if not statement or statement == "（まだ発言しない）":
         return
-    # 対象名と行動をざっくり取り出す
-    # 形式: "{名前}を**疑う**" / "{名前}を**庇う**"
-    # 太字記号を無視して処理
     s = statement.replace("**", "")
     if "を疑う" in s:
         name = s.split("を疑う")[0]
@@ -168,17 +155,15 @@ def apply_player_statement(statement: str):
         return
 
     if action == "疑う":
-        # 疑われたNPCから見て、プレイヤーへの好感度ダウン
         change_like(target, PLAYER_NAME, LIKE_DELTA_DOWN)
     elif action == "庇う":
-        # 庇われたNPCから見て、プレイヤーへの好感度アップ
         change_like(target, PLAYER_NAME, LIKE_DELTA_UP)
 
 # ---------------------------------------
 # 投票ロジック（好感度反映）
 # ---------------------------------------
 def npc_votes():
-    """NPCの投票を決定。好感度が低い相手を狙いやすい。"""
+    """NPCの投票先を決定（好感度低い相手狙い＋プレイヤー少し狙われやすい）"""
     alive_names = [name for name, alive in st.session_state.alive.items() if alive]
     current_npcs = [n for n in NPC_NAMES if st.session_state.alive[n]]
 
@@ -194,15 +179,12 @@ def npc_votes():
         likes = st.session_state.like_map[npc]
         like_values = [likes.get(c, 0) for c in candidates]
 
-        # 好感度が低い相手ほど重く（かつプレイヤーにも少しバイアス）
         weights = []
         for c, v in zip(candidates, like_values):
-            base = 1.0
-            # 好感度が低いほど基礎重みを上げる
-            w = base + (-0.3 * v)
+            base = 1.0 + max(0.0, -0.3 * v)  # 好感度が低いほど重く
             if c == PLAYER_NAME:
-                w += 0.3  # プレイヤーに少しヘイトが乗りやすい
-            weights.append(max(0.1, w))
+                base += 0.3
+            weights.append(max(0.1, base))
 
         target = random.choices(candidates, weights=weights, k=1)[0]
         votes[npc] = target
@@ -211,7 +193,7 @@ def npc_votes():
     return votes
 
 def apply_vote():
-    """投票結果を適用"""
+    """昼の投票結果を適用（追放）"""
     alive_names = [name for name, alive in st.session_state.alive.items() if alive]
     votes = {}
     votes.update(st.session_state.npc_votes)
@@ -237,14 +219,63 @@ def apply_vote():
 
     st.session_state.alive[eliminated] = False
     role = st.session_state.roles[eliminated]
-    st.session_state.log.append(f"【{eliminated}】が排除されました。（正体：{role}）")
+    st.session_state.log.append(f"【{eliminated}】が追放されました。（正体：{role}）")
+
+    # 追放後に即勝敗がつくかチェック（グノーシア全滅 or 人間≦グノ）
+    if check_win_condition():
+        return
+    # まだ続く場合は夜フェーズへ
+    st.session_state.phase = "night"
+    st.session_state.log.append("")
+    st.session_state.log.append("―― 夜がやってきた……グノーシアが誰かを『消す』 ――")
+
+# ---------------------------------------
+# 夜フェーズ：グノーシアによる襲撃
+# ---------------------------------------
+def gn_kill_target_for_npc():
+    """NPCグノーシアたちが協議したことにして、人間1人を好感度をもとに選んで『消す』"""
+    alive_names = [n for n, a in st.session_state.alive.items() if a]
+    # 生存しているグノーシア
+    gn_list = [n for n in alive_names if st.session_state.roles[n] == "グノーシア"]
+    # 生存している人間
+    human_list = [n for n in alive_names if st.session_state.roles[n] == "人間"]
+
+    if not gn_list or not human_list:
+        return None
+
+    # 各グノーシアの「好感度の低い人間」を重ね合わせるイメージで重みをつける
+    weight_map = {h: 0.0 for h in human_list}
+    for gn in gn_list:
+        likes = st.session_state.like_map[gn]
+        for h in human_list:
+            v = likes.get(h, 0)
+            # 好感度が低いほど加点（狙われやすい）
+            weight_map[h] += max(0.1, 1.0 + -0.3 * v)
+
+    targets = list(weight_map.keys())
+    weights = list(weight_map.values())
+    if not targets or sum(weights) == 0:
+        return random.choice(human_list)
+
+    target = random.choices(targets, weights=weights, k=1)[0]
+    return target
+
+def apply_night_kill(target):
+    """夜に対象を『消す』処理"""
+    if target is None:
+        return
+    if not st.session_state.alive.get(target, False):
+        return
+    st.session_state.alive[target] = False
+    role = st.session_state.roles[target]
+    st.session_state.log.append(f"【{target}】が夜の間に『消されて』しまった……。（正体：{role}）")
     check_win_condition()
 
 # ---------------------------------------
 # 勝敗判定
 # ---------------------------------------
 def check_win_condition():
-    """勝敗判定（役職ごとの陣営勝利を正確に判定）"""
+    """勝敗判定。決着したら True を返す。"""
     alive_roles = [
         st.session_state.roles[name]
         for name, alive in st.session_state.alive.items()
@@ -255,35 +286,33 @@ def check_win_condition():
 
     your_role = st.session_state.roles[PLAYER_NAME]
 
+    # グノーシア全滅 → 人間陣営勝ち
     if gn_count == 0:
         st.session_state.game_over = True
         st.session_state.win = (your_role == "人間")
         st.session_state.phase = "result"
         st.session_state.log.append("グノーシアはすべて排除されました！")
-        return
+        return True
 
+    # 人間数 <= グノーシア数 → グノーシア陣営勝ち
     if human_count <= gn_count:
         st.session_state.game_over = True
         st.session_state.win = (your_role == "グノーシア")
         st.session_state.phase = "result"
         st.session_state.log.append("人間よりグノーシアの数が多くなってしまった……。")
-        return
+        return True
 
-    # 続行（新しい日へ）
+    # 続行
     st.session_state.game_over = False
     st.session_state.win = None
-    st.session_state.phase = "discussion"
-    st.session_state.discussion_turn = 0  # 新しい日の議論はまた0から
-    st.session_state.day += 1
-    st.session_state.log.append("")
-    st.session_state.log.append(f"―― 第{st.session_state.day}日 朝 ――")
+    return False
 
 # ---------------------------------------
 # Streamlit UI
 # ---------------------------------------
 def main():
     st.set_page_config(page_title="グノーシア風ミニゲーム", page_icon="🛰")
-    st.title("🛰 一人用・グノーシア風ミニゲーム")
+    st.title("🛰 一人用・グノーシア風ミニゲーム（6NPC＋夜フェーズ）")
 
     if "roles" not in st.session_state:
         init_game()
@@ -292,7 +321,7 @@ def main():
     with st.sidebar:
         st.header("📊 ゲーム情報")
         st.markdown(f"**日数**: 第 {st.session_state.day} 日")
-        st.markdown(f"**現在のフェーズ**: {st.session_state.phase}")
+        st.markdown(f"**フェーズ**: {st.session_state.phase}")
         st.markdown(f"**議論ターン**: {st.session_state.discussion_turn}/{MAX_DISCUSSION_TURNS}")
 
         alive_list = [name for name, alive in st.session_state.alive.items() if alive]
@@ -309,42 +338,42 @@ def main():
             st.rerun()
 
     # メインログ
-    st.subheader("📜 議論ログ")
+    st.subheader("📜 ログ")
     for line in st.session_state.log:
         st.write(line)
     st.markdown("---")
 
     # ゲーム中
     if not st.session_state.game_over:
+        # ---------------- discussion ----------------
         if st.session_state.phase == "discussion":
             st.subheader("💬 議論フェーズ")
 
             remaining_turns = MAX_DISCUSSION_TURNS - st.session_state.discussion_turn
             st.info(f"この日に残された議論ターン：{remaining_turns} / {MAX_DISCUSSION_TURNS}")
 
-            # NPC発言 → プレイヤー発言 の1ターン
-            if st.button("▶️ 1ターン進める（NPC発言 → あなたの発言）", use_container_width=True):
-                # NPC発言
-                npc_talks()
-                st.session_state.discussion_turn += 1
+            if st.session_state.discussion_turn < MAX_DISCUSSION_TURNS:
+                if st.button("▶️ 1ターン進める（NPC発言 → あなたの発言）", use_container_width=True):
+                    npc_talks()
+                    st.session_state.discussion_turn += 1
+                    st.rerun()
+            else:
+                st.warning("⏰ 規定の5ターンの議論が終了しました。自動で投票フェーズに移行します。")
+                st.session_state.phase = "vote"
+                st.session_state.log.append("―― 議論終了。投票タイムへ移行 ――")
                 st.rerun()
 
-            # 「ターン進める」ボタンが押された後に、プレイヤーの発言を受付
-            # （UIとしては常に表示しておく）
+            # プレイヤーの発言
             st.markdown("### あなたの立場表明")
             alive_names = [name for name, alive in st.session_state.alive.items() if alive]
             candidates = [n for n in alive_names if n != PLAYER_NAME]
 
-            stance_options = []
+            stance_options = ["（まだ発言しない）"]
             for name in candidates:
                 stance_options.append(f"{name}を**疑う**")
                 stance_options.append(f"{name}を**庇う**")
 
-            stance = st.selectbox(
-                "立場を表明：",
-                options=["（まだ発言しない）"] + stance_options,
-                key="stance_select",
-            )
+            stance = st.selectbox("立場を表明：", options=stance_options, key="stance_select")
 
             if st.button("発言する", use_container_width=True):
                 if stance != "（まだ発言しない）":
@@ -353,34 +382,93 @@ def main():
                     apply_player_statement(stance)
                     st.rerun()
 
-            # 5ターン経過したら自動で投票フェーズへ
-            if st.session_state.discussion_turn >= MAX_DISCUSSION_TURNS:
-                st.warning("⏰ 規定の5ターンの議論が終了しました。投票フェーズに移ります。")
-                st.session_state.phase = "vote"
-                st.session_state.log.append("―― 議論終了。投票タイムへ移行 ――")
-                st.rerun()
-
+        # ---------------- vote ----------------
         elif st.session_state.phase == "vote":
             st.subheader("🗳️ 投票フェーズ")
             alive_names = [name for name, alive in st.session_state.alive.items() if alive]
             candidates = [n for n in alive_names if n != PLAYER_NAME]
 
             st.write("怪しいと思う人物に投票してください。")
-            vote_choice = st.radio("投票先：", options=candidates)
+            if not candidates:
+                st.write("投票先候補がいません。")
+            else:
+                vote_choice = st.radio("投票先：", options=candidates)
+                if st.button("投票する", use_container_width=True):
+                    st.session_state.vote_target = vote_choice
+                    npc_votes()
+                    apply_vote()
+                    st.rerun()
 
-            if st.button("投票する", use_container_width=True):
-                st.session_state.vote_target = vote_choice
-                npc_votes()
-                apply_vote()
+        # ---------------- night ----------------
+        elif st.session_state.phase == "night":
+            st.subheader("🌙 夜フェーズ（グノーシアの行動）")
+
+            alive_names = [name for name, alive in st.session_state.alive.items() if alive]
+            gn_list = [n for n in alive_names if st.session_state.roles[n] == "グノーシア"]
+            human_list = [n for n in alive_names if st.session_state.roles[n] == "人間"]
+
+            # すでに勝敗が決まっている場合は何もしない
+            if st.session_state.game_over:
+                st.stop()
+
+            your_role = st.session_state.roles[PLAYER_NAME]
+
+            # グノーシアがいない or 人間がいない → 夜に誰も消えない（ほぼ該当しないが安全策）
+            if not gn_list or not human_list:
+                st.session_state.log.append("この夜には誰も『消されなかった』ようだ……。")
+                # 次の日の朝へ（勝敗チェック含む）
+                if not check_win_condition():
+                    st.session_state.phase = "discussion"
+                    st.session_state.discussion_turn = 0
+                    st.session_state.day += 1
+                    st.session_state.log.append("")
+                    st.session_state.log.append(f"―― 第{st.session_state.day}日 朝 ――")
+                st.rerun()
+
+            # プレイヤーがグノーシア → プレイヤーが消す相手を選ぶ
+            if your_role == "グノーシア" and st.session_state.alive[PLAYER_NAME]:
+                st.write("あなたはグノーシアです。今夜『消す』人間を1人選んでください。")
+                kill_candidates = [h for h in human_list if h != PLAYER_NAME]
+                # 念のため、自分は含めない（自殺防止）
+                if not kill_candidates:
+                    st.write("『消す』対象となる人間がいません。")
+                    # 次の日へ
+                    if not check_win_condition():
+                        st.session_state.phase = "discussion"
+                        st.session_state.discussion_turn = 0
+                        st.session_state.day += 1
+                        st.session_state.log.append("")
+                        st.session_state.log.append(f"―― 第{st.session_state.day}日 朝 ――")
+                    st.rerun()
+                else:
+                    target = st.radio("『消す』相手：", options=kill_candidates)
+                    if st.button("この相手を『消す』", use_container_width=True):
+                        apply_night_kill(target)
+                        if not st.session_state.game_over:
+                            st.session_state.phase = "discussion"
+                            st.session_state.discussion_turn = 0
+                            st.session_state.day += 1
+                            st.session_state.log.append("")
+                            st.session_state.log.append(f"―― 第{st.session_state.day}日 朝 ――")
+                        st.rerun()
+            else:
+                # プレイヤーが人間 → グノーシア(NPC)が好感度を見て誰かを消す
+                st.write("グノーシアたちが暗躍している……。")
+                target = gn_kill_target_for_npc()
+                apply_night_kill(target)
+                if not st.session_state.game_over:
+                    st.session_state.phase = "discussion"
+                    st.session_state.discussion_turn = 0
+                    st.session_state.day += 1
+                    st.session_state.log.append("")
+                    st.session_state.log.append(f"―― 第{st.session_state.day}日 朝 ――")
                 st.rerun()
 
     # ゲーム終了
     if st.session_state.game_over and st.session_state.phase == "result":
         st.subheader("🏁 ゲーム結果")
         your_role = st.session_state.roles[PLAYER_NAME]
-
         st.markdown(f"### あなたの役職：**{your_role}**")
-
         if st.session_state.win:
             st.success("🎉 **あなたの陣営の勝利！**")
         else:
@@ -388,7 +476,7 @@ def main():
 
         with st.expander("👥 全員の役職と結果"):
             for name, role in st.session_state.roles.items():
-                alive_status = "☠️排除済み" if not st.session_state.alive[name] else "✅生存"
+                alive_status = "☠️排除/消滅" if not st.session_state.alive[name] else "✅生存"
                 st.write(f"- {name}：{role} ({alive_status})")
 
         if st.button("🔄 もう一度遊ぶ", use_container_width=True):
